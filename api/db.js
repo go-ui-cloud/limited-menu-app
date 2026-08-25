@@ -29,12 +29,19 @@ export async function ensureDb() {
           url TEXT NOT NULL,
           source_type TEXT,
           source_name TEXT,
+          limited_evidence TEXT,
+          evidence_score INTEGER NOT NULL DEFAULT 0,
+          verified_limited BOOLEAN NOT NULL DEFAULT FALSE,
           first_seen_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
           last_seen_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
           updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
           UNIQUE(store, title)
         )
       `
+      // V1.4からの既存DBにも安全に列追加。既存行は未確認(FALSE)のためV1.5では表示されない。
+      await sql`ALTER TABLE limited_menu_products ADD COLUMN IF NOT EXISTS limited_evidence TEXT`
+      await sql`ALTER TABLE limited_menu_products ADD COLUMN IF NOT EXISTS evidence_score INTEGER NOT NULL DEFAULT 0`
+      await sql`ALTER TABLE limited_menu_products ADD COLUMN IF NOT EXISTS verified_limited BOOLEAN NOT NULL DEFAULT FALSE`
       await sql`
         CREATE TABLE IF NOT EXISTS limited_menu_stores (
           id BIGSERIAL PRIMARY KEY,
@@ -46,6 +53,7 @@ export async function ensureDb() {
       `
       await sql`CREATE INDEX IF NOT EXISTS limited_menu_products_last_seen_idx ON limited_menu_products(last_seen_at)`
       await sql`CREATE INDEX IF NOT EXISTS limited_menu_products_store_idx ON limited_menu_products(store)`
+      await sql`CREATE INDEX IF NOT EXISTS limited_menu_products_verified_idx ON limited_menu_products(verified_limited)`
       return true
     })().catch(e => {
       readyPromise = undefined
@@ -71,6 +79,9 @@ export function rowToProduct(r) {
     url: r.url,
     sourceType: r.source_type,
     sourceName: r.source_name,
+    limitedEvidence: r.limited_evidence,
+    evidenceScore: r.evidence_score,
+    verifiedLimited: r.verified_limited,
     firstSeenAt: r.first_seen_at,
     lastSeenAt: r.last_seen_at,
     updatedAt: r.updated_at
