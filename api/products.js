@@ -4,6 +4,16 @@ const BASE=[
  ['バーガー','マクドナルド','mcdonalds.co.jp'],['バーガー','ケンタッキー','kfc.co.jp'],['バーガー','モス','mos.jp'],['バーガー','バーガーキング','burgerking.co.jp'],['スイーツ・カフェ','ミスド','misterdonut.jp'],['寿司','スシロー','akindo-sushiro.co.jp'],['寿司','はま寿司','hama-sushi.co.jp'],['寿司','くら寿司','kurasushi.co.jp'],['丼・定食','松屋','matsuyafoods.co.jp'],['丼・定食','松のや','matsuyafoods.co.jp'],['丼・定食','かつや','arclandservice.co.jp/katsuya'],['ピザ','ドミノピザ','dominos.jp'],['ピザ','ピザハット','pizzahut.jp'],['ピザ','ピザーラ','pizza-la.co.jp'],['スイーツ・カフェ','スターバックス','starbucks.co.jp'],['カレー','ココイチ','ichibanya.co.jp'],['麺','丸亀製麺','marugame.com'],['スイーツ・カフェ','31アイス','31ice.co.jp'],['弁当','ほっともっと','hottomotto.com'],['丼・定食','すき家','sukiya.jp'],['丼・定食','吉野家','yoshinoya.com']
 ]
 
+// 公式Xアカウント。検索結果のURLがこのアカウントの /status/ の場合だけ「公式X」として扱う。
+// アカウントが確認できない店舗はXを無理に採用せず、公式サイト/ニュース検索のみ使用する。
+const OFFICIAL_X={
+ 'マクドナルド':'McDonaldsJapan','ケンタッキー':'KFC_jp','モス':'mos_burger','バーガーキング':'BURGERKINGJAPAN',
+ 'ミスド':'misterdonut_jp','スシロー':'akindosushiroco','はま寿司':'hamasushi_jp','くら寿司':'mutenkurasushi',
+ '松屋':'matsuya_foods','ドミノピザ':'dominos_JP','ピザハット':'Pizza_Hut_Japan','ピザーラ':'pizzala_jp',
+ 'スターバックス':'Starbucks_J','ココイチ':'CoCoICHIofficial','丸亀製麺':'UdonMarugame','31アイス':'BR31_Icecream',
+ 'ほっともっと':'hottomotto_com','すき家':'sukiya_jp','吉野家':'yoshinoyagyudon'
+}
+
 const UA={'user-agent':'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/151 Safari/537.36','accept-language':'ja-JP,ja;q=0.9,en;q=0.5'}
 
 // V1.5: 「新商品」だけでは採用しない。期間限定である明確な根拠が必要。
@@ -14,6 +24,9 @@ const COLLAB_RE=/(コラボ|キャンペーン|フェア|第\d+弾)/i
 const BAD_TITLE_RE=/(Wikipedia|ウィキペディア|検索結果|ニュース一覧|新着情報一覧|トップページ|ホームページ|店舗一覧|店舗検索|メニュー一覧|商品一覧|持ち帰り.*(?:ガイド|まとめ)|テイクアウト.*(?:ガイド|まとめ)|完全ガイド|おすすめ\d+選|ランキング|まとめ記事|公式\s*[Xx]|@\w+)/i
 const BAD_PATH_RE=/(\/menu\/?$|\/menu\/index|\/shop|\/store|\/search|\/category|\/tag\/|\/wiki\/)/i
 const BLOCKED_HOST_RE=/(^|\.)(wikipedia\.org|x\.com|twitter\.com|instagram\.com|facebook\.com|tiktok\.com|youtube\.com|youtu\.be|pinterest\.|threads\.net|ameblo\.jp)$/i
+const X_HOST_RE=/(^|\.)(x\.com|twitter\.com)$/i
+const PRODUCT_SIGNAL_RE=/(バーガー|サンド|チキン|ツイスター|ドーナツ|パイ|寿司|すし|丼|定食|カレー|うどん|そば|ラーメン|ピザ|フラペチーノ|ラテ|コーヒー|ドリンク|アイス|サンデー|弁当|メニュー|商品|味|フレーバー|セット|発売|販売開始|新登場|新作)/i
+const CAMPAIGN_ONLY_RE=/(プレゼント|フォロー.{0,6}リポスト|リポストキャンペーン|抽選|当たる|キャンペーン開催|クーポン配布)/i
 
 const decode=s=>(s||'').replace(/&amp;/g,'&').replace(/&quot;/g,'"').replace(/&#39;|&apos;/g,"'").replace(/&lt;/g,'<').replace(/&gt;/g,'>').replace(/&nbsp;|&#160;/g,' ')
 const text=s=>decode(s||'').replace(/<script[\s\S]*?<\/script>/gi,' ').replace(/<style[\s\S]*?<\/style>/gi,' ').replace(/<noscript[\s\S]*?<\/noscript>/gi,' ').replace(/<[^>]+>/g,' ').replace(/\s+/g,' ').trim()
@@ -42,6 +55,23 @@ function scoreLimited({title,desc,body,startDate,endDate,official}){
   return{score,reasons,titleStrong,descStrong,bodyStrong}
 }
 function rejectReasonForUrl(url){const h=hostOf(url);if(BLOCKED_HOST_RE.test(h))return'blocked-host';if(BAD_PATH_RE.test(pathOf(url)))return'generic-path';return null}
+function xStatusAccount(url){try{const u=new URL(url);if(!X_HOST_RE.test(u.hostname))return null;const m=u.pathname.match(/^\/([^/]+)\/status\/\d+/i);return m?m[1]:null}catch{return null}}
+function isOfficialXUrl(url,c){const a=OFFICIAL_X[c[1]];const got=xStatusAccount(url);return !!(a&&got&&a.toLowerCase()===got.toLowerCase())}
+function xTextFromRssItem(item){return text(`${item.title||''} ${item.description||''}`).replace(/^.+? on X[:：]\s*/i,'').trim()}
+function extractOfficialXItem(item,c){
+  if(!item?.link||!isOfficialXUrl(item.link,c))return{product:null,reason:'x-not-official-account'}
+  const body=xTextFromRssItem(item),title=cleanTitle(body).slice(0,140)
+  if(!body||body.length<8)return{product:null,reason:'x-empty'}
+  if(CAMPAIGN_ONLY_RE.test(body)&&!PRODUCT_SIGNAL_RE.test(body.replace(CAMPAIGN_ONLY_RE,'')))return{product:null,reason:'x-campaign-only'}
+  const startDate=pickDate(body,'start'),endDate=pickDate(body,'end')
+  const strong=STRONG_LIMITED_RE.test(body)||UNTIL_RE.test(body)
+  const launch=startDate&&LAUNCH_RE.test(body)
+  // 公式Xでは「期間限定」の明記、終了期限、または発売日付きの商品投稿を採用。単なるキャンペーン告知は除外。
+  if(!PRODUCT_SIGNAL_RE.test(body)||(!strong&&!launch))return{product:null,reason:'x-no-product-limited-evidence'}
+  let score=4+(strong?3:0)+(launch?2:0)+(endDate?2:0)
+  const evidence=evidenceSnippet(body)||body.slice(0,280)
+  return{product:{store:c[1],category:c[0],title:title||`${c[1]} 公式Xの商品情報`,price:pickPrice(body),image:null,startDate,endDate,url:item.link,sourceType:'official-x',sourceName:`${c[1]} 公式X`,limitedEvidence:evidence,evidenceScore:score,verifiedLimited:true},reason:null}
+}
 function extract(h,url,c,official){
   const urlReject=rejectReasonForUrl(url);if(urlReject)return{product:null,reason:urlReject}
   const rawTitle=meta(h,'og:title')||meta(h,'twitter:title')||((h.match(/<title[^>]*>([\s\S]*?)<\/title>/i)||[])[1]||'')
@@ -68,14 +98,23 @@ function extract(h,url,c,official){
 }
 function normalizeSearchUrl(u){u=decode(u||'');try{const x=new URL(u,'https://duckduckgo.com');if(x.hostname.includes('duckduckgo.com'))u=x.searchParams.get('uddg')||u}catch{}try{u=decodeURIComponent(u)}catch{}return/^https?:\/\//i.test(u)?u:null}
 function ddgLinks(h){const out=[];for(const re of [/class=["'][^"']*result__a[^"']*["'][^>]+href=["']([^"']+)/gi,/href=["']([^"']+)["'][^>]+class=["'][^"']*result__a/gi])for(const m of h.matchAll(re)){const u=normalizeSearchUrl(m[1]);if(u&&!out.includes(u))out.push(u)}return out}
-function rssLinks(xml){const out=[];for(const m of xml.matchAll(/<item>[\s\S]*?<link>([^<]+)<\/link>[\s\S]*?<\/item>/gi)){const u=decode(m[1]).trim();if(/^https?:\/\//.test(u)&&!out.includes(u))out.push(u)}return out}
+function rssItems(xml){const out=[];for(const m of xml.matchAll(/<item>([\s\S]*?)<\/item>/gi)){const b=m[1],link=decode(((b.match(/<link>([^<]+)<\/link>/i)||[])[1]||'')).trim(),title=decode(((b.match(/<title>([\s\S]*?)<\/title>/i)||[])[1]||'')).replace(/<!\[CDATA\[|\]\]>/g,''),description=decode(((b.match(/<description>([\s\S]*?)<\/description>/i)||[])[1]||'')).replace(/<!\[CDATA\[|\]\]>/g,'');if(/^https?:\/\//.test(link))out.push({link,title,description})}return out}
+function rssLinks(xml){return rssItems(xml).map(x=>x.link)}
 async function searchDuck(q){try{const r=await fetch(`https://html.duckduckgo.com/html/?q=${encodeURIComponent(q)}`,{headers:UA,signal:AbortSignal.timeout(4000)});return r.ok?ddgLinks(await r.text()):[]}catch{return[]}}
 async function searchBingRss(q){try{const r=await fetch(`https://www.bing.com/search?format=rss&q=${encodeURIComponent(q)}`,{headers:UA,signal:AbortSignal.timeout(4000)});return r.ok?rssLinks(await r.text()):[]}catch{return[]}}
+async function searchBingRssItems(q){try{const r=await fetch(`https://www.bing.com/search?format=rss&q=${encodeURIComponent(q)}`,{headers:UA,signal:AbortSignal.timeout(4000)});return r.ok?rssItems(await r.text()):[]}catch{return[]}}
 async function search(q){const [a,b]=await Promise.all([searchDuck(q),searchBingRss(q)]);return[...new Set([...a,...b])]}
+async function searchOfficialX(c){
+  const handle=OFFICIAL_X[c[1]];if(!handle)return{products:[],results:[],links:0}
+  const qs=[`site:x.com/${handle}/status ${c[1]} 期間限定 商品 発売`,`site:x.com/${handle}/status ${c[1]} 新作 発売 販売開始`]
+  const batches=await Promise.all(qs.map(searchBingRssItems));const items=[];const seen=new Set()
+  for(const it of batches.flat()){if(!it.link||seen.has(it.link))continue;seen.add(it.link);if(isOfficialXUrl(it.link,c))items.push(it)}
+  const results=items.slice(0,8).map(it=>extractOfficialXItem(it,c));return{products:results.map(x=>x.product).filter(Boolean).slice(0,4),results,links:items.length}
+}
 async function fetchProduct(u,c,official){try{const urlReject=rejectReasonForUrl(u);if(urlReject)return{product:null,reason:urlReject};const r=await fetch(u,{headers:UA,redirect:'follow',signal:AbortSignal.timeout(4500)});if(!r.ok)return{product:null,reason:`http-${r.status}`};const type=(r.headers.get('content-type')||'').toLowerCase();if(type&&!type.includes('text/html')&&!type.includes('application/xhtml'))return{product:null,reason:'not-html'};return extract(await r.text(),r.url,c,official)}catch(e){return{product:null,reason:e?.name==='TimeoutError'?'timeout':'fetch-error'}}}
 function tally(arr){const out={};for(const x of arr){if(!x?.reason)continue;out[x.reason]=(out[x.reason]||0)+1}return out}
 async function one(c){
-  const d={store:c[1],officialLinks:0,newsLinks:0,officialProducts:0,newsProducts:0,rejected:{},status:'ok'}
+  const d={store:c[1],officialLinks:0,xLinks:0,newsLinks:0,officialProducts:0,xProducts:0,newsProducts:0,rejected:{},status:'ok'}
   try{
     const officialQueries=[`site:${officialHost(c)} ${c[1]} 期間限定`,`site:${officialHost(c)} ${c[1]} 数量限定 OR 季節限定 OR なくなり次第終了`]
     const officialLinks=[...new Set((await Promise.all(officialQueries.map(search))).flat())].filter(u=>isOfficial(u,c)&&!rejectReasonForUrl(u)).slice(0,7)
@@ -83,8 +122,9 @@ async function one(c){
     const officialResults=await Promise.all(officialLinks.map(u=>fetchProduct(u,c,true)))
     const officialProducts=officialResults.map(x=>x.product).filter(Boolean).slice(0,4)
     d.officialProducts=officialProducts.length
-    let out=[...officialProducts],rejects=[...officialResults]
-    if(out.length<4){
+    const x=await searchOfficialX(c);d.xLinks=x.links;d.xProducts=x.products.length
+    let out=[...officialProducts,...x.products],rejects=[...officialResults,...x.results]
+    if(out.length<6){
       const newsQueries=[`${c[1]} "期間限定" 発売 価格`,`${c[1]} "数量限定" OR "季節限定" OR "なくなり次第終了" 商品`]
       const newsLinks=[...new Set((await Promise.all(newsQueries.map(search))).flat())].filter(u=>!isOfficial(u,c)&&!rejectReasonForUrl(u)).slice(0,9)
       d.newsLinks=newsLinks.length
@@ -95,7 +135,7 @@ async function one(c){
     }
     d.rejected=tally(rejects)
     if(!out.length)d.status='no-verified-limited-products'
-    return{products:out.slice(0,6),diagnostic:d}
+    return{products:out.slice(0,8),diagnostic:d}
   }catch(e){d.status='error';d.error=String(e?.message||e).slice(0,180);return{products:[],diagnostic:d}}
 }
 async function cachedProducts(sql, requested=[]){
@@ -140,7 +180,7 @@ export default async function handler(req,res){
       const products=await cachedProducts(sql,[])
       const stamp=products.reduce((m,p)=>Math.max(m,new Date(p.updatedAt||0).getTime()||0),0)
       res.setHeader('Cache-Control','no-store, max-age=0')
-      return res.status(200).json({version:'1.5',products,updatedAt:stamp?new Date(stamp).toISOString():null,storage:'database',ttlDays:14,filter:'verified-limited-only'})
+      return res.status(200).json({version:'1.6',products,updatedAt:stamp?new Date(stamp).toISOString():null,storage:'database',ttlDays:14,filter:'verified-limited-only'})
     }
     if(req.method!=='POST'){
       res.setHeader('Allow','GET, POST')
@@ -165,7 +205,7 @@ export default async function handler(req,res){
     await saveFresh(sql,fresh)
     const products=await cachedProducts(sql,requested)
     res.setHeader('Cache-Control','no-store, max-age=0')
-    return res.status(200).json({version:'1.5',products,freshCount:fresh.length,updatedAt:new Date().toISOString(),storage:'database',ttlDays:14,filter:'verified-limited-only',diagnostics,warning:fresh.length?'':'今回、V1.5基準で期間限定と確認できる新しい取得結果はありません。DB内の確認済み情報のみ表示します。'})
+    return res.status(200).json({version:'1.6',products,freshCount:fresh.length,updatedAt:new Date().toISOString(),storage:'database',ttlDays:14,filter:'verified-limited-only',diagnostics,warning:fresh.length?'':'今回、V1.6基準で期間限定商品と確認できる新しい取得結果はありません。DB内の確認済み情報のみ表示します。'})
   }catch(e){
     const msg=e?.code==='DB_NOT_CONFIGURED'?e.message:'商品取得またはデータベース保存に失敗しました。'
     return res.status(e?.code==='DB_NOT_CONFIGURED'?503:500).json({error:msg,detail:String(e?.message||e).slice(0,300)})
