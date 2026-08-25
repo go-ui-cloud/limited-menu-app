@@ -1,3 +1,4 @@
+import { ensureDb, getSql, purgeExpired, rowToProduct } from './db.js'
 const BASE=[
  ['バーガー','マクドナルド','mcdonalds.co.jp'],['バーガー','ケンタッキー','kfc.co.jp'],['バーガー','モス','mos.jp'],['バーガー','バーガーキング','burgerking.co.jp'],['スイーツ・カフェ','ミスド','misterdonut.jp'],['寿司','スシロー','akindo-sushiro.co.jp'],['寿司','はま寿司','hama-sushi.co.jp'],['寿司','くら寿司','kurasushi.co.jp'],['丼・定食','松屋','matsuyafoods.co.jp'],['丼・定食','松のや','matsuyafoods.co.jp'],['丼・定食','かつや','arclandservice.co.jp/katsuya'],['ピザ','ドミノピザ','dominos.jp'],['ピザ','ピザハット','pizzahut.jp'],['ピザ','ピザーラ','pizza-la.co.jp'],['スイーツ・カフェ','スターバックス','starbucks.co.jp'],['カレー','ココイチ','ichibanya.co.jp'],['麺','丸亀製麺','marugame.com'],['スイーツ・カフェ','31アイス','31ice.co.jp'],['弁当','ほっともっと','hottomotto.com'],['丼・定食','すき家','sukiya.jp'],['丼・定食','吉野家','yoshinoya.com']
 ]
@@ -23,4 +24,72 @@ async function searchBingRss(q){try{const r=await fetch(`https://www.bing.com/se
 async function search(q){const [a,b]=await Promise.all([searchDuck(q),searchBingRss(q)]);return[...new Set([...a,...b])]}
 async function fetchProduct(u,c,official){try{const r=await fetch(u,{headers:UA,redirect:'follow',signal:AbortSignal.timeout(4500)});if(!r.ok)return null;const type=(r.headers.get('content-type')||'').toLowerCase();if(type&&!type.includes('text/html')&&!type.includes('application/xhtml'))return null;return extract(await r.text(),r.url,c,official)}catch{return null}}
 async function one(c){const d={store:c[1],officialLinks:0,newsLinks:0,officialProducts:0,newsProducts:0,status:'ok'};try{const officialQuery=`site:${officialHost(c)} ${c[1]} 期間限定 OR 新商品 OR 新発売`;const officialLinks=(await search(officialQuery)).filter(u=>isOfficial(u,c)).slice(0,4);d.officialLinks=officialLinks.length;const officialProducts=(await Promise.all(officialLinks.map(u=>fetchProduct(u,c,true)))).filter(Boolean).slice(0,3);d.officialProducts=officialProducts.length;let out=[...officialProducts];if(out.length<3){const newsQueries=[`${c[1]} 期間限定 新商品 発売 価格`,`${c[1]} 新発売 限定メニュー`];const newsLinks=[...new Set((await Promise.all(newsQueries.map(search))).flat())].filter(u=>!isOfficial(u,c)).slice(0,6);d.newsLinks=newsLinks.length;const newsProducts=(await Promise.all(newsLinks.map(u=>fetchProduct(u,c,false)))).filter(Boolean);d.newsProducts=newsProducts.length;out.push(...newsProducts)}if(!out.length)d.status='no-products';return{products:out.slice(0,5),diagnostic:d}}catch(e){d.status='error';d.error=String(e?.message||e).slice(0,180);return{products:[],diagnostic:d}}}
-export default async function handler(req,res){if(req.method!=='POST')return res.status(405).json({error:'POST only',hint:'アプリ画面からPOSTで呼び出してください。'});const extras=Array.isArray(req.body?.extraStores)?req.body.extraStores.filter(x=>Array.isArray(x)&&x.length===3&&/^[a-z0-9.-]+(?:\/[a-z0-9_\/-]+)?$/i.test(x[2])):[];let stores=[...BASE,...extras].slice(0,40);const requested=Array.isArray(req.body?.storeNames)?req.body.storeNames.filter(Boolean):[];if(requested.length)stores=stores.filter(x=>requested.includes(x[1]));if(!stores.length)return res.status(400).json({error:'store not found'});const settled=await Promise.all(stores.map(one));const results=settled.flatMap(x=>x.products);const diagnostics=settled.map(x=>x.diagnostic);const seen=new Set();const products=results.filter(p=>{if(!p||!p.title||!p.url)return false;const key=`${p.store}|${p.title}`.toLowerCase();if(seen.has(key))return false;seen.add(key);return true}).sort((a,b)=>{if(a.startDate&&!b.startDate)return-1;if(!a.startDate&&b.startDate)return 1;if(!a.startDate&&!b.startDate)return 0;return new Date(b.startDate)-new Date(a.startDate)});res.setHeader('Cache-Control','no-store, max-age=0');res.status(200).json({version:'1.3',products,updatedAt:new Date().toISOString(),diagnostics,warning:products.length?'':'この店舗では今回確認できる期間限定/新商品を取得できませんでした。取得済みの情報は14日間キャッシュに残ります。'})}
+async function cachedProducts(sql, requested=[]){
+  await purgeExpired(sql)
+  let rows
+  if(requested.length===1){
+    rows=await sql`SELECT * FROM limited_menu_products WHERE last_seen_at >= NOW() - INTERVAL '14 days' AND store=${requested[0]} ORDER BY start_date DESC NULLS LAST, updated_at DESC`
+  }else{
+    rows=await sql`SELECT * FROM limited_menu_products WHERE last_seen_at >= NOW() - INTERVAL '14 days' ORDER BY start_date DESC NULLS LAST, updated_at DESC`
+  }
+  return rows.map(rowToProduct)
+}
+async function saveFresh(sql,products){
+  for(const p of products){
+    await sql`
+      INSERT INTO limited_menu_products
+      (store,category,title,price,image,start_date,end_date,url,source_type,source_name,first_seen_at,last_seen_at,updated_at)
+      VALUES (${p.store},${p.category},${p.title},${p.price||null},${p.image||null},${p.startDate||null},${p.endDate||null},${p.url},${p.sourceType||null},${p.sourceName||null},NOW(),NOW(),NOW())
+      ON CONFLICT (store,title) DO UPDATE SET
+        category=EXCLUDED.category,
+        price=COALESCE(EXCLUDED.price,limited_menu_products.price),
+        image=COALESCE(EXCLUDED.image,limited_menu_products.image),
+        start_date=COALESCE(EXCLUDED.start_date,limited_menu_products.start_date),
+        end_date=COALESCE(EXCLUDED.end_date,limited_menu_products.end_date),
+        url=EXCLUDED.url,
+        source_type=COALESCE(EXCLUDED.source_type,limited_menu_products.source_type),
+        source_name=COALESCE(EXCLUDED.source_name,limited_menu_products.source_name),
+        last_seen_at=NOW(),
+        updated_at=NOW()
+    `
+  }
+}
+export default async function handler(req,res){
+  try{
+    await ensureDb()
+    const sql=getSql()
+    if(req.method==='GET'){
+      const products=await cachedProducts(sql,[])
+      const stamp=products.reduce((m,p)=>Math.max(m,new Date(p.updatedAt||0).getTime()||0),0)
+      res.setHeader('Cache-Control','no-store, max-age=0')
+      return res.status(200).json({version:'1.4',products,updatedAt:stamp?new Date(stamp).toISOString():null,storage:'database',ttlDays:14})
+    }
+    if(req.method!=='POST'){
+      res.setHeader('Allow','GET, POST')
+      return res.status(405).json({error:'GET/POST only'})
+    }
+    const dbStores=await sql`SELECT category,store,domain FROM limited_menu_stores ORDER BY created_at ASC`
+    const extras=dbStores.map(r=>[r.category,r.store,r.domain])
+    let stores=[...BASE,...extras].slice(0,60)
+    const requested=Array.isArray(req.body?.storeNames)?req.body.storeNames.filter(Boolean):[]
+    if(requested.length)stores=stores.filter(x=>requested.includes(x[1]))
+    if(!stores.length)return res.status(400).json({error:'store not found'})
+    const settled=await Promise.all(stores.map(one))
+    const results=settled.flatMap(x=>x.products)
+    const diagnostics=settled.map(x=>x.diagnostic)
+    const seen=new Set()
+    const fresh=results.filter(p=>{
+      if(!p||!p.title||!p.url)return false
+      const key=`${p.store}|${p.title}`.toLowerCase()
+      if(seen.has(key))return false
+      seen.add(key);return true
+    })
+    await saveFresh(sql,fresh)
+    const products=await cachedProducts(sql,requested)
+    res.setHeader('Cache-Control','no-store, max-age=0')
+    return res.status(200).json({version:'1.4',products,freshCount:fresh.length,updatedAt:new Date().toISOString(),storage:'database',ttlDays:14,diagnostics,warning:fresh.length?'':'今回新しい取得結果はありません。データベース内の14日以内の情報を表示します。'})
+  }catch(e){
+    const msg=e?.code==='DB_NOT_CONFIGURED'?e.message:'商品取得またはデータベース保存に失敗しました。'
+    return res.status(e?.code==='DB_NOT_CONFIGURED'?503:500).json({error:msg,detail:String(e?.message||e).slice(0,300)})
+  }
+}

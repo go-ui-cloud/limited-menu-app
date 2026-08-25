@@ -1,1 +1,8 @@
-{"name":"limited-menu-jp","version":"1.0.0","private":true}
+{
+  "name": "limited-menu-jp",
+  "version": "1.4.0",
+  "private": true,
+  "dependencies": {
+    "@neondatabase/serverless": "^1.0.1"
+  }
+}
